@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
   Plus,
   Trash2,
@@ -24,6 +24,21 @@ import {
   Bell,
   Tag,
   Lock,
+  Sparkles,
+  LogOut,
+  Cloud,
+  CloudOff,
+  RefreshCw,
+  User as UserIcon,
+  Mail,
+  MoreVertical,
+  AlertTriangle,
+  CheckCircle2,
+  Clock,
+  Sunrise,
+  Sunset,
+  Moon as MoonIcon,
+  Info,
 } from 'lucide-react';
 
 // ============================================================================
@@ -31,12 +46,11 @@ import {
 // ============================================================================
 const STORAGE_KEY_V5 = 'task-streak-tracker-v5';
 const STORAGE_KEY_V6 = 'task-streak-tracker-v6';
+const STORAGE_KEY_SETTINGS = 'task-streak-tracker-settings-v1';
+const STORAGE_KEY_GREETING = 'task-streak-tracker-greeting-v1';
 
 // ============================================================================
-// Theme palettes — same brand accent (copper) and structural language
-// (sharp corners, hairline borders) in both modes; light mode uses a cool
-// slate surface rather than a warm cream, to stay in the app's existing
-// navy family instead of a generic warm palette.
+// Theme palettes
 // ============================================================================
 const DARK_COLORS = {
   bg: '#0E2438',
@@ -50,6 +64,9 @@ const DARK_COLORS = {
   warn: '#C4776A',
   overlay: 'rgba(0,0,0,0.65)',
   shadow: 'rgba(0,0,0,0.4)',
+  googleBg: '#FFFFFF',
+  googleText: '#3C4043',
+  googleBorder: '#DADCE0',
 };
 
 const LIGHT_COLORS = {
@@ -64,6 +81,9 @@ const LIGHT_COLORS = {
   warn: '#B85C4E',
   overlay: 'rgba(18,40,58,0.45)',
   shadow: 'rgba(18,40,58,0.18)',
+  googleBg: '#FFFFFF',
+  googleText: '#3C4043',
+  googleBorder: '#DADCE0',
 };
 
 const MONTHS = [
@@ -82,9 +102,14 @@ const FREQUENCIES = [
   { value: 'once', label: 'One-time' },
 ];
 
+const DEFAULT_SETTINGS = {
+  morningReminderEnabled: false,
+  morningReminderTime: '09:00',
+  morningReminderOnlyIfPending: true,
+};
+
 // ============================================================================
-// Date utilities — always built from (year, month, day) components, never
-// from `new Date(dateString)`, so results never shift with UTC parsing.
+// Date utilities
 // ============================================================================
 function pad(n) {
   return String(n).padStart(2, '0');
@@ -113,8 +138,6 @@ function getWeekday(dateStr) {
   return dateFromStr(dateStr).getDay();
 }
 
-// ISO YYYY-MM-DD strings sort correctly as plain strings — used throughout
-// instead of re-parsing to Date objects just to compare two dates.
 function cmp(a, b) {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -126,6 +149,18 @@ function isFutureDate(dateStr) {
 function formatDateLabel(dateStr) {
   const d = dateFromStr(dateStr);
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function timeAgo(iso) {
+  if (!iso) return '';
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
 
 // ============================================================================
@@ -185,10 +220,6 @@ function isCompletedOn(task, dateStr) {
   return (task.completedDates || []).includes(dateStr);
 }
 
-// Current streak: consecutive completed scheduled occurrences counting
-// backward, with a grace period — if the most recent due occurrence is
-// today and simply hasn't been marked yet, that alone doesn't zero the
-// streak, since today isn't over. Any other missed due date does.
 function calculateCurrentStreak(task) {
   const today = todayStr();
   const scheduled = getScheduledDatesThrough(task, today);
@@ -242,7 +273,7 @@ function completedInRange(task, fromStr, toStr) {
 }
 
 // ============================================================================
-// Migration: v5 (daily/once only, flat storage) -> v6 (full schema)
+// Migration
 // ============================================================================
 function migrateTaskV5ToV6(oldTask, today) {
   const createdAt = oldTask.createdAt || today;
@@ -284,6 +315,24 @@ function normalizeLoadedTask(task) {
   };
 }
 
+function normalizeLoadedSettings(raw) {
+  if (!raw || typeof raw !== 'object') return { ...DEFAULT_SETTINGS };
+  return {
+    morningReminderEnabled:
+      typeof raw.morningReminderEnabled === 'boolean'
+        ? raw.morningReminderEnabled
+        : DEFAULT_SETTINGS.morningReminderEnabled,
+    morningReminderTime:
+      typeof raw.morningReminderTime === 'string' && /^\d{2}:\d{2}$/.test(raw.morningReminderTime)
+        ? raw.morningReminderTime
+        : DEFAULT_SETTINGS.morningReminderTime,
+    morningReminderOnlyIfPending:
+      typeof raw.morningReminderOnlyIfPending === 'boolean'
+        ? raw.morningReminderOnlyIfPending
+        : DEFAULT_SETTINGS.morningReminderOnlyIfPending,
+  };
+}
+
 // ============================================================================
 // Calendar month grid
 // ============================================================================
@@ -301,7 +350,7 @@ function getMonthCells(year, month) {
 }
 
 // ============================================================================
-// Heatmap (last N weeks, GitHub-style columns of 7)
+// Heatmap
 // ============================================================================
 function getHeatmapCells(task, weeks = 12) {
   const today = todayStr();
@@ -317,7 +366,7 @@ function getHeatmapCells(task, weeks = 12) {
     if (cmp(cursor, today) > 0) status = 'future';
     else if (!isScheduledOn(task, cursor)) status = 'non-scheduled';
     else if (isCompletedOn(task, cursor)) status = 'completed';
-    else if (cursor === today) status = 'pending'; // due today, not yet marked — not a "miss" yet
+    else if (cursor === today) status = 'pending';
     else status = 'missed';
     cells.push({ date: cursor, status });
     cursor = addDays(cursor, 1);
@@ -326,7 +375,7 @@ function getHeatmapCells(task, weeks = 12) {
 }
 
 // ============================================================================
-// Achievements — kept intentionally simple; each check runs over all tasks.
+// Achievements
 // ============================================================================
 const ACHIEVEMENT_DEFS = [
   {
@@ -360,7 +409,7 @@ function computeAchievements(tasks) {
 }
 
 // ============================================================================
-// Export / Import (local JSON backup)
+// Export / Import
 // ============================================================================
 function exportBackup(state) {
   const payload = {
@@ -368,6 +417,7 @@ function exportBackup(state) {
     dailyGoal: state.dailyGoal,
     categories: state.categories,
     theme: state.theme,
+    settings: state.settings,
     exportedAt: new Date().toISOString(),
     version: 6,
   };
@@ -403,9 +453,7 @@ function readBackupFile(file) {
 }
 
 // ============================================================================
-// Notifications — best-effort, foreground-only. There is no service worker
-// here, so reminders only fire while this tab is open; that limitation is
-// surfaced in the UI rather than implied to work in the background.
+// Notifications
 // ============================================================================
 function notificationsSupported() {
   return typeof window !== 'undefined' && 'Notification' in window;
@@ -424,8 +472,166 @@ function fireNotification(title, body) {
   try {
     new Notification(title, { body });
   } catch (e) {
-    // Some browsers (mostly mobile) disallow the constructor directly; safe to ignore.
+    // ignore
   }
+}
+
+// ============================================================================
+// Greeting helpers
+// ============================================================================
+function getTimeOfDay(hour) {
+  if (hour >= 5 && hour < 12) return 'morning';
+  if (hour >= 12 && hour < 17) return 'afternoon';
+  if (hour >= 17 && hour < 22) return 'evening';
+  return 'night';
+}
+
+function TimeIcon({ timeOfDay, size = 16, color }) {
+  if (timeOfDay === 'morning') return <Sunrise size={size} color={color} />;
+  if (timeOfDay === 'afternoon') return <Sun size={size} color={color} />;
+  if (timeOfDay === 'evening') return <Sunset size={size} color={color} />;
+  return <MoonIcon size={size} color={color} />;
+}
+
+const GREETING_PREFIXES = {
+  morning: ['Good morning', 'Rise and shine', 'Morning'],
+  afternoon: ['Good afternoon', 'Hope your day is going well'],
+  evening: ['Good evening', 'Winding down'],
+  night: ['Good night', 'Still up'],
+};
+
+function pickGreeting({ timeOfDay, displayName, todaysTasks, completedTodayCount, maxStreak, streakAlert }) {
+  const prefixOptions = GREETING_PREFIXES[timeOfDay] || GREETING_PREFIXES.morning;
+  const prefix = prefixOptions[Math.floor(Math.random() * prefixOptions.length)];
+  const greeting = displayName ? `${prefix}, ${displayName}` : prefix;
+
+  const totalToday = todaysTasks.length;
+  const pending = totalToday - completedTodayCount;
+
+  // Streak alert takes priority — it's the most actionable info.
+  if (streakAlert) {
+    return {
+      greeting,
+      line: `${streakAlert.taskText} streak is at risk — ${streakAlert.remaining} task${
+        streakAlert.remaining === 1 ? '' : 's'
+      } left today to keep it alive.`,
+      tone: 'warn',
+    };
+  }
+
+  let lines = [];
+  let tone = 'normal';
+
+  if (totalToday === 0) {
+    lines = [
+      'Ready to make today productive?',
+      "Nothing on today's schedule — a good moment to plan ahead.",
+      'A quiet day. Want to add something small?',
+    ];
+  } else if (pending <= 0) {
+    lines = [
+      "Great job! You've completed everything for today.",
+      'All done for today — you showed up.',
+      "Today's list is clear. Well done.",
+    ];
+    tone = 'good';
+  } else {
+    lines = [
+      `The day isn't over yet. You still have ${pending} task${pending === 1 ? '' : 's'} waiting for you.`,
+      `${pending} task${pending === 1 ? '' : 's'} left today — you've got this.`,
+      `Keep going — ${pending} more to finish today.`,
+    ];
+  }
+
+  if (maxStreak >= 7) {
+    lines.push(`You're on fire! Keep your streak of ${maxStreak} alive.`);
+    tone = 'good';
+  } else if (maxStreak >= 3) {
+    lines.push(`Nice streak going — ${maxStreak} in a row.`);
+  }
+
+  const line = lines[Math.floor(Math.random() * lines.length)];
+  return { greeting, line, tone };
+}
+
+// ============================================================================
+// Google "G" icon (inline SVG)
+// ============================================================================
+function GoogleGIcon({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 48 48" aria-hidden="true" style={{ display: 'block' }}>
+      <path
+        fill="#4285F4"
+        d="M45.12 24.5c0-1.56-.14-3.06-.4-4.5H24v8.51h11.84c-.51 2.75-2.06 5.08-4.39 6.64v5.52h7.11c4.16-3.83 6.56-9.47 6.56-16.17z"
+      />
+      <path
+        fill="#34A853"
+        d="M24 46c5.94 0 10.92-1.97 14.56-5.33l-7.11-5.52c-1.97 1.32-4.49 2.1-7.45 2.1-5.73 0-10.58-3.87-12.31-9.07H4.34v5.7C7.96 41.07 15.4 46 24 46z"
+      />
+      <path
+        fill="#FBBC05"
+        d="M11.69 28.18C11.25 26.86 11 25.45 11 24s.25-2.86.69-4.18v-5.7H4.34A21.99 21.99 0 0 0 2 24c0 3.55.85 6.91 2.34 9.88l7.35-5.7z"
+      />
+      <path
+        fill="#EA4335"
+        d="M24 10.75c3.23 0 6.13 1.11 8.41 3.29l6.31-6.31C34.91 4.18 29.93 2 24 2 15.4 2 7.96 6.93 4.34 14.12l7.35 5.7c1.73-5.2 6.58-9.07 12.31-9.07z"
+      />
+    </svg>
+  );
+}
+
+// ============================================================================
+// Sync status
+// ============================================================================
+function SyncStatusChip({ status, colors }) {
+  const map = {
+    local: { label: 'Local data', color: colors.textMuted, Icon: CloudOff },
+    syncing: { label: 'Syncing…', color: colors.copper, Icon: RefreshCw },
+    synced: { label: 'Synced', color: colors.complete, Icon: Cloud },
+    offline: { label: 'Offline', color: colors.warn, Icon: CloudOff },
+    error: { label: 'Sync error', color: colors.warn, Icon: CloudOff },
+  };
+  const meta = map[status] || map.local;
+  const { Icon } = meta;
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        border: `1px solid ${colors.line}`,
+        padding: '5px 9px',
+        fontSize: 11,
+        color: meta.color,
+        fontFamily: 'IBM Plex Mono, monospace',
+        whiteSpace: 'nowrap',
+      }}
+      title="Cloud sync will be available after Firebase setup"
+    >
+      <Icon size={12} />
+      {meta.label}
+    </span>
+  );
+}
+
+function SyncStatusDot({ status, colors }) {
+  const color =
+    status === 'synced' ? colors.complete
+    : status === 'syncing' ? colors.copper
+    : status === 'offline' || status === 'error' ? colors.warn
+    : colors.textMuted;
+  const label =
+    status === 'synced' ? 'Synced'
+    : status === 'syncing' ? 'Syncing…'
+    : status === 'offline' ? 'Offline'
+    : status === 'error' ? 'Sync error'
+    : 'Local data';
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: colors.textMuted }}>
+      <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, display: 'inline-block' }} />
+      {label}
+    </span>
+  );
 }
 
 // ============================================================================
@@ -436,6 +642,7 @@ function App() {
   const [dailyGoal, setDailyGoal] = useState(3);
   const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
   const [theme, setTheme] = useState('dark');
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [hydrated, setHydrated] = useState(false);
   const [migrationNotice, setMigrationNotice] = useState(false);
 
@@ -447,9 +654,26 @@ function App() {
   const [calendarMonth, setCalendarMonth] = useState(now.getMonth());
 
   const [menuOpen, setMenuOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [modal, setModal] = useState(null);
   const [importError, setImportError] = useState('');
   const [pendingImportData, setPendingImportData] = useState(null);
+
+  // ---- Auth scaffolding (Firebase will populate these later) ----
+  const [user, setUser] = useState(null);
+  const [syncStatus, setSyncStatus] = useState('local');
+  const [lastSyncedAt, setLastSyncedAt] = useState(null);
+
+  // ---- Greeting (persisted per session so it doesn't flicker) ----
+  const [greeting, setGreeting] = useState(() => {
+    try {
+      const raw = sessionStorage.getItem(STORAGE_KEY_GREETING);
+      if (raw) return JSON.parse(raw);
+    } catch (e) {}
+    return null;
+  });
 
   const emptyForm = {
     text: '',
@@ -462,10 +686,29 @@ function App() {
   };
   const [form, setForm] = useState(emptyForm);
   const [newCategoryDraft, setNewCategoryDraft] = useState('');
+  const [reminderPermission, setReminderPermission] = useState(
+    notificationsSupported() ? Notification.permission : 'unsupported'
+  );
 
   const colors = theme === 'dark' ? DARK_COLORS : LIGHT_COLORS;
   const fileInputRef = useRef(null);
   const firedRemindersRef = useRef(new Set());
+  const searchInputRef = useRef(null);
+
+  // ---- Close dropdowns when clicking outside ----
+  const headerRef = useRef(null);
+  useEffect(() => {
+    function handleClickOutside(e) {
+      if (headerRef.current && !headerRef.current.contains(e.target)) {
+        setMenuOpen(false);
+        setAccountMenuOpen(false);
+        setToolsMenuOpen(false);
+        setMobileMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   // ---- Load + one-time migration ----
   useEffect(() => {
@@ -489,13 +732,23 @@ function App() {
           setMigrationNotice(true);
         }
       }
+
+      const settingsRaw = localStorage.getItem(STORAGE_KEY_SETTINGS);
+      if (settingsRaw) {
+        try {
+          const parsed = JSON.parse(settingsRaw);
+          setSettings(normalizeLoadedSettings(parsed));
+        } catch (e) {
+          setSettings({ ...DEFAULT_SETTINGS });
+        }
+      }
     } catch (error) {
       console.error('Failed to load saved data:', error);
     }
     setHydrated(true);
   }, []);
 
-  // ---- Persist (v6 only — v5 is left untouched as a fallback) ----
+  // ---- Persist (v6 only) ----
   useEffect(() => {
     if (!hydrated) return;
     try {
@@ -508,7 +761,17 @@ function App() {
     }
   }, [tasks, dailyGoal, categories, theme, hydrated]);
 
-  // ---- Foreground reminder check ----
+  // ---- Persist settings ----
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings));
+    } catch (error) {
+      console.error('Failed to save settings:', error);
+    }
+  }, [settings, hydrated]);
+
+  // ---- Foreground reminder check (per-task) ----
   useEffect(() => {
     const interval = setInterval(() => {
       const today = todayStr();
@@ -527,6 +790,34 @@ function App() {
     }, 30000);
     return () => clearInterval(interval);
   }, [tasks]);
+
+  // ---- Morning reminder (settings-driven, local-only for now) ----
+  useEffect(() => {
+    if (!settings.morningReminderEnabled) return;
+    const interval = setInterval(() => {
+      const today = todayStr();
+      const nowTime = `${pad(new Date().getHours())}:${pad(new Date().getMinutes())}`;
+      if (nowTime < settings.morningReminderTime) return;
+      const key = `morning-${today}`;
+      if (firedRemindersRef.current.has(key)) return;
+
+      if (settings.morningReminderOnlyIfPending) {
+        const pending = tasks.filter((t) => isScheduledToday(t) && !isCompletedOn(t, today));
+        if (pending.length === 0) {
+          firedRemindersRef.current.add(key);
+          return;
+        }
+        fireNotification(
+          'Task Streak Tracker',
+          `Good morning! You have ${pending.length} task${pending.length === 1 ? '' : 's'} waiting today.`
+        );
+      } else {
+        fireNotification('Task Streak Tracker', 'Good morning! Ready to keep your streak alive?');
+      }
+      firedRemindersRef.current.add(key);
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [tasks, settings]);
 
   const selectedTask = tasks.find((t) => t.id === selectedTaskId) || null;
   const today = todayStr();
@@ -586,7 +877,59 @@ function App() {
     });
   }, [selectedTask, calendarYear, today]);
 
-  // ---- Editing state (shared by the Add and Edit task forms) ----
+  // ---- Streak alert: a task scheduled today, not done, with a streak >= 3 ----
+  const streakAlert = useMemo(() => {
+    if (todaysTasks.length === 0) return null;
+    const atRisk = todaysTasks
+      .filter((t) => !isCompletedOn(t, today))
+      .map((t) => ({ task: t, streak: calculateCurrentStreak(t) }))
+      .filter((x) => x.streak >= 3)
+      .sort((a, b) => b.streak - a.streak);
+    if (atRisk.length === 0) return null;
+    return {
+      taskText: atRisk[0].task.text,
+      streak: atRisk[0].streak,
+      remaining: todaysTasks.filter((t) => !isCompletedOn(t, today)).length,
+    };
+  }, [todaysTasks, today]);
+
+  // ---- Build the greeting once per (day + key signals), persist in sessionStorage ----
+  useEffect(() => {
+    if (!hydrated) return;
+    const hour = new Date().getHours();
+    const timeOfDay = getTimeOfDay(hour);
+    const signalKey = `${today}|${timeOfDay}|${todaysTasks.length}|${completedTodayCount}|${overallCurrentStreak}|${
+      streakAlert ? streakAlert.taskText : ''
+    }|${user?.displayName || ''}`;
+
+    try {
+      const raw = sessionStorage.getItem(STORAGE_KEY_GREETING);
+      if (raw) {
+        const cached = JSON.parse(raw);
+        if (cached.signalKey === signalKey) {
+          setGreeting(cached);
+          return;
+        }
+      }
+    } catch (e) {}
+
+    const fresh = pickGreeting({
+      timeOfDay,
+      displayName: user?.displayName || '',
+      todaysTasks,
+      completedTodayCount,
+      maxStreak: overallCurrentStreak,
+      streakAlert,
+    });
+    const payload = { ...fresh, signalKey, timeOfDay };
+    setGreeting(payload);
+    try {
+      sessionStorage.setItem(STORAGE_KEY_GREETING, JSON.stringify(payload));
+    } catch (e) {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, today, todaysTasks.length, completedTodayCount, overallCurrentStreak, streakAlert, user?.displayName]);
+
+  // ---- Editing state ----
   const [editingId, setEditingId] = useState(null);
   const [goalDraft, setGoalDraft] = useState(dailyGoal);
 
@@ -595,6 +938,7 @@ function App() {
     setSelectedTaskId(id);
     setPage('task');
     setMenuOpen(false);
+    setMobileMenuOpen(false);
     const n = new Date();
     setCalendarMonth(n.getMonth());
     setCalendarYear(n.getFullYear());
@@ -604,6 +948,7 @@ function App() {
     setPage('dashboard');
     setSelectedTaskId(null);
     setMenuOpen(false);
+    setMobileMenuOpen(false);
   }
 
   function changeMonth(delta) {
@@ -647,6 +992,7 @@ function App() {
     setForm({ ...emptyForm, startDate: todayStr() });
     setEditingId(null);
     setModal('taskForm');
+    setMobileMenuOpen(false);
   }
 
   function openEditModal(task) {
@@ -758,7 +1104,8 @@ function App() {
 
   // ---- Export / Import ----
   function handleExport() {
-    exportBackup({ tasks, dailyGoal, categories, theme });
+    exportBackup({ tasks, dailyGoal, categories, theme, settings });
+    setToolsMenuOpen(false);
   }
 
   function handleImportFileChange(e) {
@@ -776,6 +1123,7 @@ function App() {
         setPendingImportData(null);
         setModal('import');
       });
+    setToolsMenuOpen(false);
   }
 
   function confirmImport() {
@@ -786,6 +1134,7 @@ function App() {
       setCategories(pendingImportData.categories);
     }
     if (pendingImportData.theme === 'light' || pendingImportData.theme === 'dark') setTheme(pendingImportData.theme);
+    if (pendingImportData.settings) setSettings(normalizeLoadedSettings(pendingImportData.settings));
     setModal(null);
     setPendingImportData(null);
     goDashboard();
@@ -796,6 +1145,47 @@ function App() {
     setImportError('');
     setPendingImportData(null);
   }
+
+  // ---- Auth placeholder ----
+  function handleGoogleSignInClick() {
+    setModal('googleInfo');
+    setMobileMenuOpen(false);
+  }
+
+  async function handleRequestNotifications() {
+    const result = await requestNotificationPermission();
+    setReminderPermission(result);
+  }
+
+  // ---- Keyboard shortcuts ----
+  useEffect(() => {
+    function handleKey(e) {
+      const tag = (e.target && e.target.tagName) || '';
+      const isTyping = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target?.isContentEditable;
+
+      if (e.key === 'Escape') {
+        if (modal) {
+          closeModal();
+        } else {
+          setMenuOpen(false);
+          setAccountMenuOpen(false);
+          setToolsMenuOpen(false);
+          setMobileMenuOpen(false);
+        }
+        return;
+      }
+
+      if (isTyping) return;
+
+      if ((e.key === 'n' || e.key === 'N') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        openAddModal();
+      }
+    }
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modal]);
 
   if (!hydrated) {
     return (
@@ -855,9 +1245,68 @@ function App() {
         .btn-primary:hover:not(:disabled) { color: #101820; opacity: 0.9; }
         .btn-primary:disabled { opacity: 0.45; }
         .btn-sm { padding: 7px 11px; font-size: 12px; }
+        .btn-danger-ghost { color: ${colors.warn}; border-color: ${colors.line}; }
+        .btn-danger-ghost:hover:not(:disabled) { border-color: ${colors.warn}; color: ${colors.warn}; }
+
+        /* Tools menu (unified ⚙️ dropdown) */
+        .tools-menu { width: 240px; padding: 6px; }
+        .tools-item {
+          width: 100%;
+          display: flex; align-items: center; gap: 10px;
+          background: transparent; border: 0; color: ${colors.text};
+          padding: 10px 12px; text-align: left; font-size: 13px;
+        }
+        .tools-item:hover { background: rgba(127,127,127,0.08); color: ${colors.copper}; }
+        .tools-item .sub { font-size: 11px; color: ${colors.textMuted}; margin-top: 2px; }
+        .tools-divider { height: 1px; background: ${colors.lineDim}; margin: 6px 0; }
+
+        /* Google Sign-In (official-ish styling) */
+        .google-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 10px;
+          background: ${colors.googleBg};
+          color: ${colors.googleText};
+          border: 1px solid ${colors.googleBorder};
+          padding: 9px 14px 9px 12px;
+          font-weight: 500;
+          font-size: 13px;
+          transition: 0.2s;
+          box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+        }
+        .google-btn:hover { box-shadow: 0 2px 6px rgba(0,0,0,0.12); }
+        .google-btn .g-wrap {
+          display: inline-flex; align-items: center; justify-content: center;
+          width: 18px; height: 18px; flex: 0 0 auto;
+        }
+
+        /* Profile chip */
+        .profile-btn {
+          display: inline-flex; align-items: center; gap: 9px;
+          background: ${colors.panel}; color: ${colors.text};
+          border: 1px solid ${colors.line}; padding: 5px 10px 5px 5px;
+        }
+        .profile-btn:hover { border-color: ${colors.copper}; }
+        .profile-avatar {
+          width: 26px; height: 26px; border-radius: 50%;
+          background: ${colors.copper}; color: #101820;
+          display: flex; align-items: center; justify-content: center;
+          font-weight: 700; font-size: 12px; overflow: hidden; flex: 0 0 auto;
+        }
+        .profile-avatar img { width: 100%; height: 100%; object-fit: cover; }
+        .profile-info { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.2; }
+        .profile-name { font-size: 13px; font-weight: 600; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .profile-sync { font-size: 10px; color: ${colors.textMuted}; display: inline-flex; align-items: center; gap: 5px; }
 
         .dropdown { position: relative; }
         .dropdown-menu { position: absolute; right: 0; top: calc(100% + 8px); width: 320px; background: ${colors.panel}; border: 1px solid ${colors.line}; z-index: 30; box-shadow: 0 15px 45px ${colors.shadow}; padding: 8px; max-height: 400px; overflow-y: auto; }
+
+        .account-menu { width: 300px; padding: 12px; }
+        .account-menu-row { display: flex; align-items: center; gap: 10px; padding: 8px 6px; color: ${colors.textMuted}; font-size: 13px; }
+        .account-menu-row .label { color: ${colors.text}; font-weight: 500; }
+        .account-menu-row.disabled { opacity: 0.6; cursor: not-allowed; }
+        .account-menu-header { display: flex; align-items: center; gap: 10px; padding-bottom: 10px; margin-bottom: 8px; border-bottom: 1px solid ${colors.lineDim}; }
+        .account-menu-note { font-size: 11px; color: ${colors.textMuted}; background: ${colors.bg}; border: 1px dashed ${colors.line}; padding: 8px 10px; margin-top: 8px; line-height: 1.4; }
 
         .task-option { width: 100%; background: transparent; color: ${colors.text}; border: 0; padding: 11px; display: flex; align-items: center; justify-content: space-between; text-align: left; gap: 10px; }
         .task-option:hover { background: rgba(127,127,127,0.08); }
@@ -868,6 +1317,27 @@ function App() {
         .task-option-streak { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: ${colors.copper}; white-space: nowrap; }
 
         .section-title { font-size: 13px; color: ${colors.textMuted}; text-transform: uppercase; letter-spacing: 1.3px; margin-bottom: 12px; font-family: 'IBM Plex Mono', monospace; display: flex; align-items: center; justify-content: space-between; }
+
+        /* Greeting card */
+        .greeting-card {
+          border: 1px solid ${colors.lineDim};
+          background: ${colors.panel};
+          padding: 18px 20px;
+          margin-bottom: 22px;
+          position: relative;
+          overflow: hidden;
+        }
+        .greeting-card.tone-good { border-color: ${colors.complete}; }
+        .greeting-card.tone-warn { border-color: ${colors.warn}; }
+        .greeting-card::after {
+          content: '';
+          position: absolute; top: -40px; right: -40px;
+          width: 160px; height: 160px;
+          background: radial-gradient(circle, rgba(201,138,75,0.15), transparent 70%);
+          pointer-events: none;
+        }
+        .greeting-title { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 16px; margin-bottom: 5px; }
+        .greeting-line { color: ${colors.textMuted}; font-size: 13px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
         .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 22px; }
         .stat-card { background: ${colors.panel}; border: 1px solid ${colors.lineDim}; padding: 18px; min-height: 125px; }
@@ -885,7 +1355,7 @@ function App() {
         .today-item-name.done { text-decoration: line-through; color: ${colors.textMuted}; }
         .today-item-meta { font-size: 12px; color: ${colors.textMuted}; display: flex; gap: 8px; align-items: center; margin-top: 2px; }
         .today-item-right { display: flex; align-items: center; gap: 14px; flex: 0 0 auto; }
-        .today-streak { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: ${colors.copper}; white-space: nowrap; }
+        .today-streak { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: ${colors.copper}; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
 
         .category-pill { display: inline-flex; align-items: center; gap: 5px; border: 1px solid ${colors.line}; padding: 3px 9px; font-size: 11px; color: ${colors.textMuted}; }
 
@@ -969,7 +1439,7 @@ function App() {
         .modal-backdrop { position: fixed; inset: 0; background: ${colors.overlay}; display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px; overflow-y: auto; }
         .modal { width: min(480px, 100%); background: ${colors.panel}; border: 1px solid ${colors.line}; box-shadow: 0 25px 80px ${colors.shadow}; padding: 22px; max-height: 90vh; overflow-y: auto; }
         .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-        .modal-title { font-size: 18px; font-weight: 600; }
+        .modal-title { font-size: 18px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
         .close-btn { background: transparent; border: 0; color: ${colors.textMuted}; padding: 4px; }
         .close-btn:hover { color: ${colors.text}; }
 
@@ -992,22 +1462,46 @@ function App() {
         .error-box { border: 1px solid ${colors.warn}; color: ${colors.warn}; padding: 10px 12px; font-size: 12px; margin-bottom: 14px; }
         .notice-box { border: 1px solid ${colors.copper}; color: ${colors.copper}; padding: 10px 12px; font-size: 12px; margin-bottom: 18px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 
+        .settings-section { border-top: 1px solid ${colors.lineDim}; padding-top: 16px; margin-top: 16px; }
+        .settings-section:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+        .settings-section-title { font-size: 12px; color: ${colors.textMuted}; text-transform: uppercase; letter-spacing: 1.2px; font-family: 'IBM Plex Mono', monospace; margin-bottom: 12px; }
+        .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; }
+        .settings-row .label { font-size: 13px; }
+        .settings-row .sub { font-size: 11px; color: ${colors.textMuted}; margin-top: 2px; }
+
+        .switch { position: relative; width: 40px; height: 22px; flex: 0 0 auto; border: 1px solid ${colors.line}; background: ${colors.bg}; transition: 0.2s; }
+        .switch.on { background: ${colors.copper}; border-color: ${colors.copper}; }
+        .switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; background: ${colors.text}; transition: 0.2s; }
+        .switch.on::after { left: 20px; background: #101820; }
+
+        .google-modal-hero { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
+        .google-modal-hero-icon { width: 46px; height: 46px; border-radius: 50%; background: #fff; border: 1px solid ${colors.googleBorder}; display: flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+
+        .kbd {
+          display: inline-block; font-family: 'IBM Plex Mono', monospace; font-size: 10px;
+          border: 1px solid ${colors.line}; padding: 1px 5px; color: ${colors.textMuted}; margin-left: 4px;
+        }
+
         .mono { font-family: 'IBM Plex Mono', monospace; }
 
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 
         @media (max-width: 900px) {
           .stats-grid { grid-template-columns: repeat(2, 1fr); }
           .field-row { grid-template-columns: 1fr; }
         }
 
-        @media (max-width: 650px) {
+        @media (max-width: 720px) {
           .container { width: min(100% - 20px, 1180px); padding-top: 18px; }
           .header { align-items: flex-start; }
           .brand-title { font-size: 17px; }
           .header-actions { gap: 6px; }
-          .btn span { display: none; }
-          .btn-icon span { display: none; }
+          .hide-mobile { display: none !important; }
+          .google-btn { padding: 9px; }
+          .google-btn .g-label { display: none; }
+          .profile-info { display: none; }
+          .profile-btn { padding: 5px; }
           .stats-grid { grid-template-columns: repeat(2, 1fr); }
           .stat-card { min-height: 105px; padding: 14px; }
           .stat-value { font-size: 22px; }
@@ -1017,15 +1511,18 @@ function App() {
           .chart { gap: 4px; }
           .bar-label { font-size: 8px; }
           .dropdown-menu { right: -50px; width: min(320px, calc(100vw - 20px)); }
+          .account-menu { width: min(300px, calc(100vw - 40px)); }
           .today-item { flex-wrap: wrap; }
           .achievements-grid { grid-template-columns: 1fr; }
+          .greeting-card { padding: 14px 16px; }
+          .greeting-title { font-size: 15px; }
         }
       `}</style>
 
       <div className="app">
         <div className="container">
           {/* HEADER */}
-          <header className="header">
+          <header className="header" ref={headerRef}>
             <div className="brand">
               <div className="brand-icon">
                 <Flame size={22} />
@@ -1037,17 +1534,107 @@ function App() {
             </div>
 
             <div className="header-actions">
-              <button className="btn btn-icon" onClick={toggleTheme} title="Toggle dark / light mode">
-                {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
+              {/* My Tasks — only when there is at least one task */}
+              {tasks.length > 0 && (
+                <div className="dropdown">
+                  <button className="btn" onClick={() => {
+                    setMenuOpen(!menuOpen);
+                    setToolsMenuOpen(false);
+                    setAccountMenuOpen(false);
+                    setMobileMenuOpen(false);
+                  }}>
+                    <CalendarDays size={17} />
+                    <span>My Tasks</span>
+                    <ChevronDown size={15} />
+                  </button>
+
+                  {menuOpen && (
+                    <div className="dropdown-menu">
+                      {tasks.map((task) => (
+                        <button key={task.id} className="task-option" onClick={() => openTask(task.id)}>
+                          <div className="task-option-left">
+                            <span className={`task-dot ${isCompletedOn(task, today) ? 'done' : ''}`} />
+                            <span className="task-option-name">{task.text}</span>
+                          </div>
+                          <span className="task-option-streak">
+                            <Flame size={11} style={{ verticalAlign: -1, marginRight: 3 }} />
+                            {calculateCurrentStreak(task)}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Add Task */}
+              <button className="btn btn-primary" onClick={openAddModal}>
+                <Plus size={17} />
+                <span>Add Task</span>
+                <span className="kbd hide-mobile">N</span>
               </button>
 
-              <button className="btn btn-icon" onClick={handleExport} title="Export backup (JSON)">
-                <Download size={17} />
-              </button>
+              {/* Unified tools menu (theme, export, import, settings) */}
+              <div className="dropdown">
+                <button
+                  className="btn btn-icon"
+                  title="Tools & settings"
+                  onClick={() => {
+                    setToolsMenuOpen(!toolsMenuOpen);
+                    setMenuOpen(false);
+                    setAccountMenuOpen(false);
+                    setMobileMenuOpen(false);
+                  }}
+                >
+                  <Settings2 size={17} />
+                </button>
 
-              <button className="btn btn-icon" onClick={() => fileInputRef.current && fileInputRef.current.click()} title="Import backup (JSON)">
-                <Upload size={17} />
-              </button>
+                {toolsMenuOpen && (
+                  <div className="dropdown-menu tools-menu">
+                    <button className="tools-item" onClick={() => { toggleTheme(); setToolsMenuOpen(false); }}>
+                      {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+                      <div>
+                        <div>Switch to {theme === 'dark' ? 'light' : 'dark'} mode</div>
+                      </div>
+                    </button>
+
+                    <div className="tools-divider" />
+
+                    <button className="tools-item" onClick={handleExport}>
+                      <Download size={16} />
+                      <div>
+                        <div>Export backup</div>
+                        <div className="sub">Download JSON</div>
+                      </div>
+                    </button>
+
+                    <button
+                      className="tools-item"
+                      onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                    >
+                      <Upload size={16} />
+                      <div>
+                        <div>Import backup</div>
+                        <div className="sub">Restore from JSON</div>
+                      </div>
+                    </button>
+
+                    <div className="tools-divider" />
+
+                    <button
+                      className="tools-item"
+                      onClick={() => { setModal('settings'); setToolsMenuOpen(false); }}
+                    >
+                      <Settings2 size={16} />
+                      <div>
+                        <div>Settings</div>
+                        <div className="sub">Reminders & sync</div>
+                      </div>
+                    </button>
+                  </div>
+                )}
+              </div>
+
               <input
                 ref={fileInputRef}
                 type="file"
@@ -1056,38 +1643,84 @@ function App() {
                 onChange={handleImportFileChange}
               />
 
-              <div className="dropdown">
-                <button className="btn" onClick={() => setMenuOpen(!menuOpen)}>
-                  <CalendarDays size={17} />
-                  <span>My Tasks</span>
-                  <ChevronDown size={15} />
-                </button>
+              {/* Auth area: Google button OR profile chip */}
+              {user ? (
+                <div className="dropdown">
+                  <button
+                    className="profile-btn"
+                    onClick={() => {
+                      setAccountMenuOpen(!accountMenuOpen);
+                      setMenuOpen(false);
+                      setToolsMenuOpen(false);
+                    }}
+                  >
+                    <span className="profile-avatar">
+                      {user.photoURL ? (
+                        <img src={user.photoURL} alt="" />
+                      ) : (
+                        (user.displayName || user.email || 'U').slice(0, 1).toUpperCase()
+                      )}
+                    </span>
+                    <span className="profile-info">
+                      <span className="profile-name">{user.displayName || user.email || 'Account'}</span>
+                      <SyncStatusDot status={syncStatus} colors={colors} />
+                    </span>
+                    <ChevronDown size={14} />
+                  </button>
 
-                {menuOpen && (
-                  <div className="dropdown-menu">
-                    {tasks.length === 0 ? (
-                      <div style={{ padding: 18, color: colors.textMuted, fontSize: 13, textAlign: 'center' }}>
-                        No tasks yet.
-                      </div>
-                    ) : (
-                      tasks.map((task) => (
-                        <button key={task.id} className="task-option" onClick={() => openTask(task.id)}>
-                          <div className="task-option-left">
-                            <span className={`task-dot ${isCompletedOn(task, today) ? 'done' : ''}`} />
-                            <span className="task-option-name">{task.text}</span>
+                  {accountMenuOpen && (
+                    <div className="dropdown-menu account-menu">
+                      <div className="account-menu-header">
+                        <span className="profile-avatar" style={{ width: 32, height: 32, fontSize: 14 }}>
+                          {user.photoURL ? (
+                            <img src={user.photoURL} alt="" />
+                          ) : (
+                            (user.displayName || user.email || 'U').slice(0, 1).toUpperCase()
+                          )}
+                        </span>
+                        <div style={{ minWidth: 0 }}>
+                          <div className="profile-name" style={{ maxWidth: 200 }}>
+                            {user.displayName || 'Account'}
                           </div>
-                          <span className="task-option-streak">🔥 {calculateCurrentStreak(task)}</span>
-                        </button>
-                      ))
-                    )}
-                  </div>
-                )}
-              </div>
+                          <div style={{ fontSize: 11, color: colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {user.email || ''}
+                          </div>
+                        </div>
+                      </div>
 
-              <button className="btn btn-primary" onClick={openAddModal}>
-                <Plus size={17} />
-                <span>Add Task</span>
-              </button>
+                      <div className="account-menu-row">
+                        <UserIcon size={14} />
+                        <span className="label">Account</span>
+                      </div>
+                      <div className="account-menu-row">
+                        <Mail size={14} />
+                        <span>{user.email || '—'}</span>
+                      </div>
+                      <div className="account-menu-row">
+                        <SyncStatusChip status={syncStatus} colors={colors} />
+                        {lastSyncedAt && syncStatus === 'synced' && (
+                          <span style={{ fontSize: 11 }}>· {timeAgo(lastSyncedAt)}</span>
+                        )}
+                      </div>
+                      <div className="account-menu-row disabled" title="Available after Firebase setup">
+                        <LogOut size={14} />
+                        <span>Sign out</span>
+                      </div>
+
+                      <div className="account-menu-note">
+                        Account actions will be enabled after Firebase authentication is connected.
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <button className="google-btn" onClick={handleGoogleSignInClick} title="Sign in with Google">
+                  <span className="g-wrap">
+                    <GoogleGIcon size={18} />
+                  </span>
+                  <span className="g-label">Sign in with Google</span>
+                </button>
+              )}
             </div>
           </header>
 
@@ -1102,6 +1735,27 @@ function App() {
 
           {page === 'dashboard' ? (
             <>
+              {/* GREETING */}
+              {greeting && (
+                <div className={`greeting-card ${greeting.tone === 'good' ? 'tone-good' : greeting.tone === 'warn' ? 'tone-warn' : ''}`}>
+                  <div className="greeting-title">
+                    {greeting.tone === 'warn' ? (
+                      <AlertTriangle size={16} color={colors.warn} />
+                    ) : greeting.tone === 'good' ? (
+                      <CheckCircle2 size={16} color={colors.complete} />
+                    ) : (
+                      <TimeIcon timeOfDay={greeting.timeOfDay} size={16} color={colors.copper} />
+                    )}
+                    {greeting.greeting}
+                  </div>
+                  <div className="greeting-line">
+                    {greeting.tone === 'good' && <Check size={13} color={colors.complete} />}
+                    {greeting.tone === 'warn' && <Flame size={13} color={colors.warn} />}
+                    {greeting.line}
+                  </div>
+                </div>
+              )}
+
               {/* TODAY */}
               <div className="section-title">Today · {formatDateLabel(today)}</div>
 
@@ -1143,7 +1797,10 @@ function App() {
                           </div>
                         </div>
                         <div className="today-item-right">
-                          <span className="today-streak">🔥 {calculateCurrentStreak(task)}</span>
+                          <span className="today-streak">
+                            <Flame size={12} />
+                            {calculateCurrentStreak(task)}
+                          </span>
                         </div>
                       </div>
                     );
@@ -1697,6 +2354,218 @@ function App() {
         </div>
       )}
 
+      {/* SETTINGS MODAL */}
+      {modal === 'settings' && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) closeModal();
+          }}
+        >
+          <div className="modal" style={{ width: 'min(520px, 100%)' }}>
+            <div className="modal-header">
+              <div className="modal-title">
+                <Settings2 size={18} color={colors.copper} />
+                Settings
+              </div>
+              <button className="close-btn" onClick={closeModal}>
+                <X size={19} />
+              </button>
+            </div>
+
+            {/* Daily Morning Reminder */}
+            <div className="settings-section">
+              <div className="settings-section-title">Daily Morning Reminder</div>
+
+              <div className="settings-row">
+                <div>
+                  <div className="label">Enable morning reminder</div>
+                  <div className="sub">A friendly nudge to keep your streak going.</div>
+                </div>
+                <button
+                  type="button"
+                  className={`switch ${settings.morningReminderEnabled ? 'on' : ''}`}
+                  onClick={() =>
+                    setSettings((s) => ({ ...s, morningReminderEnabled: !s.morningReminderEnabled }))
+                  }
+                  aria-label="Toggle morning reminder"
+                />
+              </div>
+
+              <div className="settings-row">
+                <div>
+                  <div className="label">Reminder time</div>
+                  <div className="sub">Default: 9:00 AM</div>
+                </div>
+                <input
+                  className="input"
+                  style={{ width: 130 }}
+                  type="time"
+                  value={settings.morningReminderTime}
+                  disabled={!settings.morningReminderEnabled}
+                  onChange={(e) => setSettings((s) => ({ ...s, morningReminderTime: e.target.value || '09:00' }))}
+                />
+              </div>
+
+              <div className="settings-row">
+                <div>
+                  <div className="label">Only remind me when I have unfinished tasks</div>
+                  <div className="sub">Skip the reminder on days with nothing pending.</div>
+                </div>
+                <button
+                  type="button"
+                  className={`switch ${settings.morningReminderOnlyIfPending ? 'on' : ''}`}
+                  onClick={() =>
+                    setSettings((s) => ({
+                      ...s,
+                      morningReminderOnlyIfPending: !s.morningReminderOnlyIfPending,
+                    }))
+                  }
+                  aria-label="Toggle only-if-pending"
+                />
+              </div>
+
+              <div className="field-hint" style={{ marginTop: 6 }}>
+                <Bell size={11} style={{ verticalAlign: -1, marginRight: 4 }} />
+                Fires a local browser notification while this tab is open. Email reminders will be added after
+                the backend is connected.
+              </div>
+            </div>
+
+            {/* Browser Notifications */}
+            <div className="settings-section">
+              <div className="settings-section-title">Browser Notifications</div>
+              <div className="settings-row">
+                <div>
+                  <div className="label">Permission</div>
+                  <div className="sub">
+                    Status: <span className="mono">{reminderPermission}</span>
+                  </div>
+                </div>
+                <button
+                  className="btn btn-sm"
+                  onClick={handleRequestNotifications}
+                  disabled={reminderPermission === 'granted' || reminderPermission === 'unsupported'}
+                >
+                  <Bell size={14} />
+                  {reminderPermission === 'granted' ? 'Enabled' : 'Enable'}
+                </button>
+              </div>
+            </div>
+
+            {/* Sync */}
+            <div className="settings-section">
+              <div className="settings-section-title">Sync</div>
+              <div className="settings-row">
+                <div>
+                  <div className="label">Cloud sync</div>
+                  <div className="sub">Currently local-only. Will sync across devices after Firebase setup.</div>
+                </div>
+                <SyncStatusChip status={syncStatus} colors={colors} />
+              </div>
+            </div>
+
+            {/* Backup */}
+            <div className="settings-section">
+              <div className="settings-section-title">Backup</div>
+              <div className="settings-row">
+                <div className="label">Export / Import</div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="btn btn-sm" onClick={handleExport}>
+                    <Download size={14} /> Export
+                  </button>
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                  >
+                    <Upload size={14} /> Import
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Keyboard shortcuts */}
+            <div className="settings-section">
+              <div className="settings-section-title">Keyboard Shortcuts</div>
+              <div className="settings-row">
+                <div className="label">New task</div>
+                <span className="kbd">N</span>
+              </div>
+              <div className="settings-row">
+                <div className="label">Close modal / menu</div>
+                <span className="kbd">Esc</span>
+              </div>
+            </div>
+
+            <div className="modal-actions">
+              <button className="btn btn-primary" onClick={closeModal}>Done</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* GOOGLE SIGN-IN INFO MODAL */}
+      {modal === 'googleInfo' && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) closeModal();
+          }}
+        >
+          <div className="modal" style={{ width: 'min(440px, 100%)' }}>
+            <div className="modal-header">
+              <div className="modal-title">
+                <Cloud size={18} color={colors.copper} />
+                Cloud Sync — Coming Soon
+              </div>
+              <button className="close-btn" onClick={closeModal}>
+                <X size={19} />
+              </button>
+            </div>
+
+            <div className="google-modal-hero">
+              <div className="google-modal-hero-icon">
+                <GoogleGIcon size={24} />
+              </div>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 15 }}>Sign in with Google</div>
+                <div style={{ fontSize: 12, color: colors.textMuted, marginTop: 2 }}>
+                  Coming after Firebase setup
+                </div>
+              </div>
+            </div>
+
+            <p style={{ fontSize: 13, color: colors.textMuted, lineHeight: 1.6, margin: '0 0 8px' }}>
+              Soon you'll be able to sign in with your Google account and:
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 18 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13 }}>
+                <Cloud size={15} color={colors.copper} />
+                Sync your tasks across all your devices
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13 }}>
+                <Bell size={15} color={colors.copper} />
+                Get friendly morning email reminders
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13 }}>
+                <Trophy size={15} color={colors.copper} />
+                Keep your streaks safe, even if you change devices
+              </div>
+            </div>
+
+            <div className="account-menu-note" style={{ marginBottom: 12 }}>
+              <Info size={12} style={{ verticalAlign: -2, marginRight: 6 }} />
+              Your data is currently saved locally on this device and stays safe. Nothing has been lost.
+            </div>
+
+            <div className="modal-actions">
+              <button className="btn btn-primary" onClick={closeModal}>Got it</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* IMPORT CONFIRMATION MODAL */}
       {modal === 'import' && (
         <div
@@ -1743,3 +2612,9 @@ function App() {
 }
 
 export default App;
+
+
+
+  
+  
+  
